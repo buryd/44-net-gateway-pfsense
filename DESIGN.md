@@ -1,244 +1,171 @@
-# 44 Net gateway on pfSense
+# 44 Net gateway on pfSense, using 44Net Connect
 
-Worked example. Replace `44.63.100.0/28` with the prefix ARDC assigns you.
+Worked example. Replace every 44 address with the values from your Connect dashboard.
 
-pfSense is the firewall and the default gateway for every 44 host. A Linux VM behind it is only the IPIP mesh endpoint. You reach hosts from the public internet through WireGuard. A stranger reaches a host only when you add a transit rule for that host and port and, for general internet traffic, an `ampr.org` DNS name.
+pfSense terminates one 44Net Connect WireGuard tunnel. Connect assigns that tunnel a single IPv4 `/32`. A second allocation, the routed subnet, is attached to the same tunnel, and the hosts sit on that subnet. Connect routes the subnet to the tunnel over your existing internet connection, including through NAT or CGNAT. pfSense is the firewall in front of the hosts.
 
-## What you are building
+Your own phone or laptop uses a second Connect tunnel and its own `/32`. pfSense allows that one address through to the hosts. Every other internet source stops on the WireGuard interface unless you publish one host and one port.
+
+## Topology
 
 ```
-Internet
-  |  IP protocol 4 (IPIP) to your public address
-  |  WireGuard UDP to pfSense
-  v
-pfSense WAN
-  |-- WireGuard 10.44.255.0/24     you, full access to hosts
-  |-- TRANSIT  10.44.0.1  <---->  Linux VM 10.44.0.2
-  |                                  tunl0 44.63.100.14/32
-  |                                  ampr-ripd  --->  other 44 gateways
-  |                                             --->  amprgw 169.228.34.84
-  |-- AMPRLAN  44.63.100.1/28      hosts .2 – .13
-  |-- LAN      192.168.1.0/24      home PCs
+Your phone  --Connect WireGuard /32-->  44Net Connect
+Internet strangers ------------------>  44Net Connect
+                                              |
+                                     WireGuard UDP
+                                              |
+                                         pfSense WAN
+                                              |
+                                         tunnel /32
+                                         interface WG44
+                                              |
+                                         AMPRLAN
+                                    routed subnet from Connect
+                                         hosts .130–.134
+
+Home LAN 192.168.1.0/24 stays on the normal WAN gateway.
 ```
 
-FreeBSD IPIP tunnels are point-to-point. The 44 Net mesh needs one tunnel and a different outer endpoint for each remote gateway. Linux `tunl0` plus `ampr-ripd` does that. The VM has no NIC on the 44 VLAN, so every decapsulated packet comes back through pfSense before it reaches a host.
+One peer on the gateway tunnel. A second peer on that same tunnel cannot share `0.0.0.0/0`. The phone is its own tunnel in the Connect dashboard, and it is not a peer on pfSense.
 
-## Requirements
+## Addresses
 
-- A public IPv4 on the pfSense WAN. CGNAT will not work for the IPIP mesh.
-- The ISP path must pass IP protocol 4 in both directions.
-- An ARDC portal account and an assignment. Use case: IPIP Tunnel Mesh, from `44.63.0.0/16`. Request a `/28` or `/29`.
-- A hostname that resolves to the WAN address. Use dynamic DNS when the WAN address changes. The portal resolves that hostname when it builds the mesh.
-- A ham allocation is for amateur radio use under the ARDC terms. Log into the portal at least every few months so the assignment stays active.
+These are documentation placeholders. `44.190.40.10/32` is the shape of a tunnel address in the Connect setup help. `44.27.45.128/29` is the shape of a routed subnet in the Connect subnet guides. Your dashboard will issue different numbers. Enter the tunnel address as a `/32` even when the generated config file shows a `/24`.
 
-Confirm `169.228.34.84` in the portal before use. That is the long-standing UCSD amprgw address and it can change.
+| Role | Example | Source |
+| --- | --- | --- |
+| pfSense tunnel | `44.190.40.10/32` | Tunnel config, Interface address |
+| Routed subnet | `44.27.45.128/29` | Connect network request, then attached to the pfSense tunnel |
+| Host gateway | `44.27.45.129/29` | First usable address, on pfSense AMPRLAN |
+| Hosts | `44.27.45.130` – `44.27.45.134` | Static on the 44 VLAN |
+| Operator phone | `44.190.41.20/32` | A second Connect tunnel, on the phone only |
+| Home LAN | `192.168.1.0/24` | Existing trusted network |
 
-If the ISP blocks protocol 4, stop here and use 44Net Connect (ARDC WireGuard) instead. This design depends on IPIP.
+On a `/29`, `.128` is the network address and `.135` is the broadcast. Leave both unused. A `/29` has five host addresses after the gateway. Connect auto-approves a request up to a `/28` (thirteen hosts after the gateway). Attach any extra subnet to this same tunnel.
 
-## Address plan
+Each host has one NIC, on the 44 VLAN, mask `255.255.255.248` for this `/29`, gateway `44.27.45.129`. A second NIC on the home LAN would bypass the firewall.
 
-| Role | Address |
-| --- | --- |
-| Prefix | `44.63.100.0/28` |
-| pfSense AMPRLAN | `44.63.100.1/28` |
-| Hosts | `44.63.100.2` – `44.63.100.13` |
-| Linux tunl0 | `44.63.100.14/32` |
-| pfSense TRANSIT | `10.44.0.1/29` |
-| Linux transit NIC | `10.44.0.2/29` |
-| WireGuard | `10.44.255.1/24` on pfSense, peer `10.44.255.2/32` |
-| Home LAN | your existing LAN, shown as `192.168.1.0/24` |
+## Connect dashboard
 
-Network and broadcast of the `/28` are `.0` and `.15`. Leave them unused.
+Portal account and a verified callsign live at the ARDC portal. Tunnels and subnets are managed at `connect.44net.cloud`.
 
-Each 44 host has one NIC, on the 44 VLAN, with a static address, mask `255.255.255.240`, and gateway `44.63.100.1`. A second NIC on the home LAN would bypass the firewall.
+1. On pfSense, install WireGuard only if `VPN > WireGuard` is missing. Current pfSense CE 2.7 and Plus already have that menu.
+2. `VPN > WireGuard > Tunnels > Add Tunnel`. Generate a keypair. Copy the public key.
+3. In Connect, create a tunnel, choose a server, and paste that public key. Keep the downloaded config private. It contains the private key. Do not commit it to the public git repository.
+4. Request a network, `/29` or `/28`. After it is approved, edit the pfSense tunnel, open **Route additional Networks Through This Tunnel**, and select that subnet.
+5. Create a second tunnel for the phone, with the phone's own public key. Leave the routed subnet attached only to the pfSense tunnel.
 
-## Portal
+From the pfSense tunnel config, copy the endpoint address, UDP port, peer public key, pre-shared key if one is present, persistent keepalive, and MTU.
 
-1. Register at the ARDC portal.
-2. Request the prefix. Use case IPIP Tunnel Mesh. Size `/28` or `/29`. Description can be your callsign.
-3. Create a gateway. Encap type IPIP. Hostname is the name that resolves to the pfSense WAN address.
-4. Link the prefix to that gateway.
-5. Create an `ampr.org` A record only for a host you intend to publish. amprgw does not deliver general internet traffic to an address with no DNS name. Other mesh gateways can still send packets, which is why the transit rules default to deny.
+## pfSense tunnel
 
-## pfSense interfaces
+Set the IPv4 default gateway to the WAN gateway before assigning the WireGuard interface. Leave it there. With the default left on Automatic, pfSense can move the house default route onto the tunnel.
 
-Create two interfaces besides WAN and LAN.
+**Tunnel.** Interface address `44.190.40.10/32`. Skip the IPv6 address. This design numbers hosts with the IPv4 subnet only.
 
-**AMPRLAN.** VLAN or dedicated NIC. IPv4 `44.63.100.1/28`. MSS `1440`. Use `1380` when WAN is PPPoE (the IPIP header costs 20 bytes; PPPoE costs another 8).
+**Peer.** Uncheck Dynamic Endpoint. Endpoint and port come from the config. Keepalive comes from the config, usually `25`, which is what keeps the tunnel up behind NAT. Allowed IPs: `0.0.0.0/0`. That entry tells WireGuard to accept packets from any public source and to send the subnet's traffic to Connect. It does not by itself change the firewall default route.
 
-**TRANSIT.** VLAN or dedicated NIC to the VM only. IPv4 `10.44.0.1/29`. The VM is the only device on this network.
+**Enable.** `VPN > WireGuard > Settings`, enable WireGuard. Confirm a recent handshake under `Status > WireGuard`.
 
-**Gateway.** System → Routing → Gateways. Name `AMPRGW`, interface TRANSIT, address `10.44.0.2`.
+**Assign.** `Interfaces > Assignments`, add the `tun_wg` interface, enable it, and name it `WG44`. Set MTU from the Connect config, or `1420` when the config omits it. Put the same `/32` on this interface as a static IPv4 address if it is not already present on the tunnel. Use it in one place if pfSense rejects the duplicate.
 
-**Static route.** `44.0.0.0/8` via `AMPRGW`. The connected route `44.63.100.0/28` is more specific, so local hosts stay on AMPRLAN.
+**Gateway.** On that interface, add a gateway named `WG44_GW`. For a `/32` tunnel, set the gateway address to the tunnel address itself, `44.190.40.10`, which is the pfSense client-tunnel pattern. Do not select it as the system default. Disable gateway monitoring on it. A monitor target that never answers marks the gateway down, and pfSense then stops policy-routing the hosts.
 
-**GUI.** System → Advanced → Admin Access. Listen on the LAN address. AMPRLAN, TRANSIT, and WAN do not serve the GUI.
+**AMPRLAN.** VLAN or dedicated NIC. IPv4 `44.27.45.129/29`. MSS `1380` when the tunnel MTU is `1420` (MTU minus 40). Raise or lower both together if Connect gives a different MTU.
 
-**Outbound NAT.** Leave Automatic or Hybrid. Traffic from AMPRLAN to TRANSIT is between internal interfaces, so the 44 source address is preserved. Traffic from a host to the general internet exits WAN and is translated to the house address. That translation does not accept inbound connections.
+**WireGuard rule tab.** Firewall rules that belong on this tunnel go on the assigned `WG44` tab. Leave the group WireGuard tab empty. Group rules match first and do not get `reply-to`, so return traffic would follow the WAN default route and the inbound session would fail.
 
-Check this after the VM is up: on the Linux transit NIC, packets from a host toward another 44 network must show the host’s 44 address as the source. If you ever see them rewritten, add a No-NAT outbound rule for source `44.63.100.0/28` destination `44.0.0.0/8`.
+## Routing and NAT
 
-## pfSense firewall
+Hosts use pfSense as their gateway. A pass rule on AMPRLAN sets the gateway to `WG44_GW`, so traffic from the subnet enters the Connect tunnel with the host's own 44 address as the source.
 
-Rules are on the interface where the packet enters. A pass on AMPRLAN lets a host start a session. The reply matches state and is allowed back through TRANSIT without a pass rule. A new session from the mesh or the internet needs its own pass on TRANSIT.
+`reply-to` on the `WG44` rules sends replies to inbound sessions back out the same tunnel.
+
+Outbound NAT mode: Hybrid.
+
+Add this rule at the top of the outbound NAT list:
+
+- Interface `WG44`
+- Source `44.27.45.128/29`
+- Destination any
+- **Do not NAT** checked
+
+Automatic mode NATs traffic leaving an assigned WireGuard interface to the tunnel `/32`. That would make every host answer as `44.190.40.10` and break sessions aimed at the host addresses. The Do-not-NAT rule keeps each host on its own address. Leave the existing WAN NAT rules in place so the home LAN still translates out the ISP address.
+
+Check after a host is up: a query from `44.27.45.130` to a public "what is my IP" service shows `44.27.45.130`. The house WAN address and the tunnel `/32` both mean the policy route or the NAT exception is wrong. `Diagnostics > Routes` shows the default route on the WAN gateway.
+
+## Firewall
+
+A rule lets traffic that enters that interface start a session. Replies follow the state table. Connect delivers the subnet to the tunnel as soon as the tunnel is up, so an empty pass list on `WG44` is what keeps the hosts closed.
 
 ### Aliases
 
-- `AMPR_NET` = `44.63.100.0/28`
-- `AMPR44` = `44.0.0.0/8`
+- `AMPR_NET` = `44.27.45.128/29`
+- `OPERATOR_44` = `44.190.41.20/32`
 - `LAN_NET` = `192.168.1.0/24`
-- `WG_NET` = `10.44.255.0/24`
-- One host alias per published service, for example `PUB_NODE` = `44.63.100.10`
+- `PUB_HOST` = `44.27.45.130`, only if you publish a service
+- `MGMT_PORTS` = `22`, `80`, `443`, plus the real pfSense GUI port if you moved it
 
-### WAN
+### WG44
 
-1. Pass IPv4 protocol IPENCAP, destination WAN address. This is the associated rule for the NAT entry below. Enable logging.
-2. Pass UDP, destination WAN address, destination port = your WireGuard port, to *This Firewall*.
-3. Leave the default deny in place. Create no port forwards to a 44 host.
+Top to bottom.
 
-### NAT, port forward
+1. Pass source `OPERATOR_44`, destination `AMPR_NET`. This is you, from the phone's Connect tunnel, to every host.
+2. Pass a published service only when you want one. Example: TCP, destination `PUB_HOST`, port `7300`. Log it.
+3. Reject destination `LAN_NET`.
+4. Reject destination `AMPR_NET`. Log it. This is the default for the rest of the internet and for everyone else on 44Net.
+5. Reject destination *This Firewall*.
 
-- Interface WAN
-- Protocol IPENCAP
-- Destination WAN address
-- Redirect target `10.44.0.2`
-- Associate the WAN pass rule above
-
-Outbound IPIP from the VM uses the VM address `10.44.0.2`. Automatic outbound NAT on WAN rewrites that outer source to the public address the portal has for you. The inner 44 header is untouched.
-
-### TRANSIT
-
-Evaluate top to bottom.
-
-1. Pass ICMP echo-request to `AMPR_NET` only if you want outside ping. Otherwise omit it.
-2. Pass the published services, one rule each. Example: TCP, destination `PUB_NODE`, port `7300`. Log these.
-3. Reject IPv4 destination `LAN_NET`.
-4. Reject IPv4 destination `AMPR_NET`. Log this rule. It is the default for strangers and for other 44 gateways.
-
-SSH to the VM is not in this list. Admin of the VM comes from LAN or WireGuard, below.
+The tunnel `/32` is a public address on pfSense. With no pass to *This Firewall* on this tab, the GUI and SSH are not served on that address.
 
 ### AMPRLAN
 
-1. Reject destination *This Firewall*, ports `22`, `80`, `443`, and any other management port.
+1. Reject destination *This Firewall*, ports `MGMT_PORTS`.
 2. Reject destination `LAN_NET`.
-3. Reject destination `10.44.0.0/29`.
-4. Pass destination *This Firewall*, UDP/TCP `53` and UDP `123`, if hosts use pfSense for DNS and NTP.
-5. Pass destination `AMPR44`.
-6. Pass TCP destination any, ports `80` and `443`, gateway WAN. This is outbound update traffic. It is translated to the house address. It does not publish the host.
-7. Reject IPv4 any. Log it.
+3. Pass source `AMPR_NET`, destination any, gateway `WG44_GW`.
 
-### WIREGUARD
-
-1. Pass source `WG_NET` destination `AMPR_NET`.
-2. Pass source `WG_NET` destination `10.44.0.2` TCP `22`, if you want to admin the VM remotely.
-3. Reject the rest, or add a separate pass to `LAN_NET` if the same VPN should also reach home PCs.
+Hosts reach the internet through Connect as their own 44 addresses. They can reach each other on the VLAN. They cannot open a session to the home LAN or the firewall GUI.
 
 ### LAN
 
 1. Pass destination `AMPR_NET`.
-2. Pass destination `10.44.0.2` TCP `22`.
 
-There is no rule anywhere that lets a 44 host open a new session to the home LAN.
+LAN rules keep the default gateway. Home PCs reach the 44 hosts directly, and their other traffic stays on the ISP link.
 
-## WireGuard
+### WAN
 
-VPN → WireGuard on pfSense. Current CE 2.7 and Plus include it.
+No port forwards to a 44 host. Inbound host traffic arrives inside the Connect tunnel, on `WG44`.
 
-- Tunnel address `10.44.255.1/24`
-- Listen on WAN, UDP. Pick a port and match the WAN rule.
-- Peer allowed IPs: `10.44.255.2/32`
-- On the laptop or phone, split tunnel. AllowedIPs = `44.63.100.0/28, 10.44.255.0/24`
-- Add `192.168.1.0/24` to AllowedIPs only if that peer should also reach the home LAN
+The GUI listens on the LAN address only.
 
-After the tunnel is up, a host is `44.63.100.10`. The session is between your peer and pfSense. The host has no listener exposed to the internet by this path.
+## Phone tunnel
 
-Keep SSH, RDP, VNC, SMB, and WinRM on this path only.
+On the phone, the Connect config keeps its own `/32`. Set the phone's Allowed IPs to `44.27.45.128/29` so only traffic to the hosts uses the tunnel. After the handshake, a host is `44.27.45.130`.
 
-## Linux gateway
-
-Debian or Ubuntu, one vCPU, 512 MB RAM is enough. One NIC, address `10.44.0.2/29`, default gateway `10.44.0.1`. Install `ampr-ripd` and `iptables`. Do not put a default route out `tunl0` in the main table. The VM reaches the internet, and you, through pfSense.
-
-`/etc/sysctl.d/44net.conf`:
-
-```
-net.ipv4.ip_forward=1
-net.ipv4.conf.all.rp_filter=0
-net.ipv4.conf.tunl0.rp_filter=0
-net.ipv4.icmp_errors_use_inbound_ifaddr=1
-```
-
-Loose reverse-path filtering is required. Strict mode drops legitimate mesh packets because the outer path and the inner path differ.
-
-Bring-up, with the example prefix:
-
-```sh
-modprobe ipip
-ip tunnel add tunl0 mode ipip local 10.44.0.2
-ip addr add 44.63.100.14/32 dev tunl0
-ip link set tunl0 mtu 1480 up
-
-ip route add 44.63.100.0/28 via 10.44.0.1
-
-ip rule add from 44.63.100.0/28 table 44 priority 44
-ip rule add to 44.0.0.0/8 table 44 priority 45
-ip route add 44.63.100.0/28 via 10.44.0.1 dev eth0 table 44
-ip route add default via 169.228.34.84 dev tunl0 onlink table 44
-```
-
-Use the transit NIC name you actually have in place of `eth0`. The route for your own prefix in table 44 is what stops local delivery from being encapsulated back out the tunnel.
-
-`ampr-ripd` learns the other gateways from RIP inside the tunnel (UDP 520 to `224.0.0.9`, source `44.0.0.1`). That port stays inside the tunnel. It is not a WAN forward.
-
-```sh
-ampr-ripd -s -i tunl0 -t 44 -a 44.63.100.0/28
-```
-
-`-a` tells it not to install a route for your own prefix. `-s` writes the route set under `/var/lib/ampr-ripd/`.
-
-Forwarding filter on the VM. Policy for which ports are open lives on pfSense. This filter only limits what the VM is willing to carry.
-
-```sh
-iptables -P FORWARD DROP
-iptables -A FORWARD -i tunl0 -o tunl0 -j DROP
-iptables -A FORWARD -i tunl0 -s 44.63.100.0/28 -j DROP
-iptables -A FORWARD -i tunl0 -p 4 -j DROP
-iptables -A FORWARD -i tunl0 -o eth0 -d 44.63.100.0/28 -j ACCEPT
-iptables -A FORWARD -i eth0 -o tunl0 -s 44.63.100.0/28 -j ACCEPT
-
-iptables -A INPUT -i eth0 -s 10.44.0.1 -j ACCEPT
-iptables -A INPUT -i eth0 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
-iptables -A INPUT -i lo -j ACCEPT
-iptables -P INPUT DROP
-```
-
-Add the usual bogon sources on `tunl0` as well: `0.0.0.0/8`, `10.0.0.0/8`, `100.64.0.0/10`, `127.0.0.0/8`, `169.254.0.0/16`, `172.16.0.0/12`, `192.168.0.0/16`, `192.0.0.0/24`, `192.0.2.0/24`, `198.18.0.0/15`, `198.51.100.0/24`, `203.0.113.0/24`, `224.0.0.0/4`, `240.0.0.0/4`. The wiki page IPIP Mesh/Firewalls is the checklist.
-
-The VM’s own SSH listens on the transit NIC and accepts `10.44.0.1`. Reach it from the LAN rule or the WireGuard rule. Do not open SSH on `tunl0`.
+SSH, RDP, VNC, SMB, and WinRM stay covered by the `OPERATOR_44` rule only. Repeat that same allow list on each host firewall.
 
 ## Publishing one service
 
-Do all three. Any one of them alone is incomplete.
+All three, when strangers should reach it:
 
-1. pfSense TRANSIT pass: protocol and port, destination that host only. Place it above the reject-all rule.
+1. A `WG44` pass above the reject rule, for that host and port only.
 2. The same allow on the host firewall.
-3. An `ampr.org` A record for that address, if general internet users (not only other 44 gateways) should reach it.
-
-Example for a single packet service on `44.63.100.10` TCP `7300`. Nothing else on that host is opened by those three steps.
+3. Nothing else. Connect is already routing the address. There is no separate DNS gate in front of the firewall.
 
 ## Tests
 
-Run them in this order.
+1. `Status > WireGuard` shows a handshake.
+2. The default route is the WAN gateway. A LAN PC still loads a normal website.
+3. From a host, ping `44.27.45.129`.
+4. From that host, a public IP echo shows the host's 44 address.
+5. From the internet, with the phone tunnel down, the host accepts no connection.
+6. Bring up the phone tunnel. The host answers from that phone.
+7. From a host, a connection to `192.168.1.x` fails.
+8. After you add one published port, that port answers and a different port on the same host does not.
 
-1. From a host, ping `44.63.100.1`.
-2. On the VM, `ip route show table 44` shows mesh routes after a few minutes, and `tcpdump -n -i tunl0` shows RIP from `44.0.0.1`.
-3. From a host, ping a known distant 44 address. On the VM transit NIC the source is the host’s 44 address.
-4. From the internet, with the VPN down, the unpublished host does not answer ping or a port scan.
-5. Bring up WireGuard. The same host answers from the peer.
-6. From a 44 host, a connection to a `192.168.1.x` address fails.
-7. After you publish one port, that port answers and a different port on the same host does not.
+## References
 
-## What this design leaves out
-
-BGP announcement of your own prefix. That puts the block in the global table and removes the amprgw DNS check. It needs a `/24`, an ASN, and an ISP that will announce 44 Net space without an RPKI ROA. The transit deny rules would still be required, and the exposure is larger. Use BGP only when the mesh path is the wrong tool.
-
-44Net Connect. Use it when you have CGNAT or protocol 4 is filtered. It is a different attachment method and it does not automatically join the IPIP mesh.
+- 44Net Connect: `https://wiki.ampr.org/wiki/44Net_Connect`
+- pfSense tunnel: `https://wiki.ampr.org/wiki/44Net_Connect/Quick_Start/PFsense`
+- Routed subnet: `https://wiki.ampr.org/wiki/44Net_Connect/Routed_Subnet`
+- pfSense WireGuard client and return routing: Netgate docs, WireGuard VPN Client Configuration Example, and WireGuard Routing
